@@ -81,6 +81,84 @@ class Blob:
         elif self.y > BOARD_SIZE-1:
             self.y = BOARD_SIZE-1
 
+class Game:
+
+    STATE_ACTIVE = 0
+    STATE_WON = 1
+    STATE_LOST = 2
+
+    def __init__(self, board_size=BOARD_SIZE):
+        self.board_size = board_size
+
+        # Create place holders
+        self.player = None
+        self.food = None
+        self.enemy = None
+        
+        self._state = None
+
+    def reset(self):
+        # Create our players
+        self.player = Blob() #TODO: Link board_size to players
+        self.food = Blob()
+        self.enemy = Blob()
+
+        # Store if the game is over
+        self._state = self.STATE_ACTIVE
+    
+        # Return the starting state
+        return self.state()
+    
+
+    def step(self, action):
+        # Move the player acording to the action
+        self.player.action(action)
+
+        # TODO: Maybe move food / enemy randomly (would probably need to add velocity to state )
+
+        # Calculate reward
+        reward = None
+        if self.player == self.enemy:
+            reward = -ENEMY_PENALTY
+            self._state = self.STATE_LOST
+        elif self.player == self.food:
+            reward = FOOD_REWARD
+            self._state = self.STATE_WON
+        else:
+            reward = -MOVE_PENALTY
+
+        return self.state(), reward, self._state
+
+    def done(self):
+        return self._state == self.STATE_WON or self._state == self.STATE_LOST
+
+    def state(self):
+        return (self.player-self.food, self.player-self.enemy)
+
+    def render(self):
+        # Create a array to store the color of each spot on the board (3 is for R,G,B or B,G,R) 
+        env = np.zeros((self.board_size, self.board_size, 3), dtype=np.uint8)
+        
+        # NOTE: X and Y are goofy here... not 100% which lib needs it in this format
+        env[self.food.y][self.food.x] = d[FOOD_N] # Food color (dictonary kinda not needed)
+        env[self.player.y][self.player.x] = d[PLAYER_N]
+        env[self.enemy.y][self.enemy.x] = d[ENEMY_N]
+
+        # NOTE: RGB... might work it might also be BGR 
+        img = Image.fromarray(env, "RGB")
+        img = img.resize((300,300), resample=Image.BOX) # Scale up image (previously was BOARD_SIZE x BOARD_SIZE)
+        cv2.imshow("", np.array(img))
+
+        if self.done(): # End game senarios
+            # If at end of game flash frame for 500ms
+            # waitKey is just used as a pause / sleep function
+            if cv2.waitKey(500) & 0xFF == ord('q'): # NOTE: Second clause is hacky (he said q breaks shit)
+                return
+        else:
+            # If not at end of game flash frame for 1ms
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                return
+
 q_table = {}
 
 if start_q_table is None:
@@ -103,16 +181,13 @@ else:
     with open(start_q_table, "rb") as f:
         q_table = pickle.load(f)
 
+game = Game()
 
 win_count = 0
 lose_count = 0
 episode_rewards = []
 for episode in tqdm(range(EPISODES_LEN)):
-    player = Blob()
-    food = Blob()
-    enemy = Blob()
-
-    
+    observation = game.reset()
 
     if episode % SHOW_EVERY == 0:
         print('\n\n=======================')
@@ -138,69 +213,46 @@ for episode in tqdm(range(EPISODES_LEN)):
     
     episode_reward = 0
     for i in range(200):
-        # Calculate the relative positioning and use as the state/obseravation
-        observation = (player-food, player-enemy)
-
         if np.random.random() > EPSILON:
             action = np.argmax(q_table[observation])
         else:
             action = np.random.randint(0,4)
         
-        player.action(action)
-
-        # TODO: Randomly move the enemy and food movement
-
-        # Update Q
-        if player == enemy:
-            lose_count += 1
-            reward = -ENEMY_PENALTY
-        elif player == food:
-            win_count += 1
-            reward = FOOD_REWARD
-        else:
-            reward = -MOVE_PENALTY
+        new_observation, reward, game_state = game.step(action)
     
-        # Preform update to Q
-        new_observation = (player-food, player-enemy)
-        max_future_q = np.max(q_table[new_observation])
-        #print(observation, action)
-        current_q = q_table[observation][action]
 
-        # WARNING: Different than tutorial but 90% should work 
-        new_q = (1 - LEARNING_RATE) * current_q + LEARNING_RATE * (reward + DISCOUNT * max_future_q)
+        new_q = None
+        if game_state == Game.STATE_ACTIVE:
+            # Preform update to Q
+            max_future_q = np.max(q_table[new_observation])
+            #print(observation, action)
+            current_q = q_table[observation][action]
 
+            # WARNING: Different than tutorial but 90% should work 
+            new_q = (1 - LEARNING_RATE) * current_q + LEARNING_RATE * (reward + DISCOUNT * max_future_q)
+        elif game_state == Game.STATE_LOST:
+            lose_count += 1
+            new_q = reward
+        elif game_state == Game.STATE_WON:
+            win_count += 1
+            new_q = reward 
+
+        assert new_q is not None, 'Error: Q Estimates should not be NoneType'
+
+        # Update the Q estimate
         q_table[observation][action] = new_q
-
-        if show:
-            # Create a array to store the color of each spot on the board (3 is for R,G,B or B,G,R) 
-            env = np.zeros((BOARD_SIZE, BOARD_SIZE, 3), dtype=np.uint8)
-            
-            # NOTE: X and Y are goofy here... not 100% which lib needs it in this format
-            env[food.y][food.x] = d[FOOD_N] # Food color (dictonary kinda not needed)
-            env[player.y][player.x] = d[PLAYER_N]
-            env[enemy.y][enemy.x] = d[ENEMY_N]
-
-            # NOTE: RGB... might work it might also be BGR 
-            img = Image.fromarray(env, "RGB")
-            img = img.resize((300,300)) # Scale up image (previously was BOARD_SIZE x BOARD_SIZE)
-            cv2.imshow("", np.array(img))
-
-            if reward == FOOD_REWARD or reward == -ENEMY_PENALTY: # End game senarios
-                # If at end of game flash frame for 500ms
-                # waitKey is just used as a pause / sleep function
-                if cv2.waitKey(500) & 0xFF == ord('q'): # NOTE: Second clause is hacky (he said q breaks shit)
-                    break
-            else:
-                # If not at end of game flash frame for 1ms
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-
         # Accumulate the total reward after each time step
         episode_reward += reward
 
+        if show:
+            game.render()
+
         # Break loop if end of episode
-        if reward == FOOD_REWARD or reward == -ENEMY_PENALTY:
+        if game.done():
             break
+        
+        # Update observation for next time step
+        observation = new_observation
 
     episode_rewards.append(episode_reward)
 
