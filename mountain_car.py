@@ -15,7 +15,7 @@ env = gym.make("MountainCar-v0")
 # [20, 20] for mountain car
 LEARNING_RATE = 0.1
 DISCOUNT = 0.95
-EPISODES = 25000
+EPISODES = 10000
 
 epsilon = 0.5
 START_EPSILON_DECAYING = 1
@@ -45,6 +45,7 @@ Low / High rationalization: The rewards for mountain car are -1 (besides goal)..
 can be reasonably sure that the values will fall somewhere in there??
 '''
 q_table = np.random.uniform(low=-2, high=0, size=(DISCRETE_O_SPACE_SIZE + [env.action_space.n])) # size = [20, 20, N (actions)]... random table
+print(q_table.shape)
 
 episode_rewards = []
 rewards = {'episode': [], 'average': [], 'min': [], 'max': []}
@@ -131,8 +132,28 @@ for episode in tqdm(range(EPISODES)):
 
 env.close()
 
-plt.plot(rewards['episode'], rewards['average'], label='avg')
-plt.plot(rewards['episode'], rewards['min'], label='min')
-plt.plot(rewards['episode'], rewards['max'], label='max')
-plt.legend(loc=4)
-plt.show()
+if False:
+    plt.plot(rewards['episode'], rewards['average'], label='avg')
+    plt.plot(rewards['episode'], rewards['min'], label='min')
+    plt.plot(rewards['episode'], rewards['max'], label='max')
+    plt.legend(loc=4)
+    plt.show()
+if True:
+    # Create v-table estimate
+    x = np.arange(0, 20, 1)
+    y = np.arange(0, 20, 1)
+    
+    X, Y = np.meshgrid(x, y)
+    v_table = np.amax(q_table, axis=2)
+
+    print(v_table.shape)
+    print(v_table[:,0])
+    print(v_table[:,1])
+    print(v_table[:,2])
+
+    plt3d = plt.figure().gca(projection='3d')
+    plt3d.plot_surface(X, Y, v_table)
+    plt3d.set_xlabel('position')
+    plt3d.set_ylabel('velocity')
+    plt3d.set_zlabel('value')
+    plt.show()
