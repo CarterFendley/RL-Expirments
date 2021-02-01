@@ -6,40 +6,41 @@ import pickle
 from matplotlib import style
 import time
 from tqdm import tqdm
+from multiprocessing import Process, Manager
+from multiprocessing.managers import BaseManager
 
 style.use('ggplot')
 
-BOARD_SIZE = 10
-EPISODES_LEN = 25000
 
-MOVE_PENALTY = 1
-ENEMY_PENALTY = 300
-FOOD_REWARD = 25
+import wandb
+from config import WANDB_API_KEY
+wandb.login(key=WANDB_API_KEY)
 
-LEARNING_RATE = 0.1
-DISCOUNT = 0.95
-
-EPSILON = 0.9
-EPS_DECAY = 0.9998 # Kind random??
-
-SHOW_EVERY = 3000
+hyperparameters = dict(
+    BOARD_SIZE = 10,
+    EPISODE_COUNT = 12500,
+    EPISODE_LEN = 200,
+    LEARNING_RATE = 0.1,
+    DISCOUNT = 0.9,
+    MOVE_PENALTY = 1,
+    ENEMY_PENALTY = 300,
+    FOOD_REWARD = 25,
+    EPSILON_START = 0.9,
+    EPS_DECAY = 0.99996, # Kind random??
+    SHOW_EVERY = 3000,
+)
 
 start_q_table = None # Or load a existing save path
 
-PLAYER_N = 1
-FOOD_N = 2
-ENEMY_N = 3
-
-d = {
-    1: (255, 175, 0),
-    2: (0, 255, 0),
-    3: (0, 0, 255),
-}
+PLAYER_COLOR = (255, 175, 0)
+FOOD_COLOR = (0, 255, 0)
+ENEMY_COLOR = (0, 0, 255)
 
 class Blob:
-    def __init__(self):
-        self.x = np.random.randint(0, BOARD_SIZE)
-        self.y = np.random.randint(0, BOARD_SIZE)
+    def __init__(self, board_size=10):
+        self.board_size = board_size
+        self.x = np.random.randint(0, board_size)
+        self.y = np.random.randint(0, board_size)
     
     def __str__(self):
         return f'{self.x}, {self.y}'
@@ -59,6 +60,8 @@ class Blob:
             self.move(x=-1, y=1)
         elif choice == 3:
             self.move(x=1, y=-1)
+        else:
+            raise ValueError(f'Invalid action type: {choice}')
 
     def move(self, x=False, y=False):
         if not x:
@@ -73,13 +76,13 @@ class Blob:
 
         if self.x < 0:
             self.x = 0
-        elif self.x > BOARD_SIZE-1:
-            self.x = BOARD_SIZE-1
+        elif self.x > self.board_size-1:
+            self.x = self.board_size-1
 
         if self.y < 0:
             self.y = 0
-        elif self.y > BOARD_SIZE-1:
-            self.y = BOARD_SIZE-1
+        elif self.y > self.board_size-1:
+            self.y = self.board_size-1
 
 class Game:
 
@@ -87,8 +90,13 @@ class Game:
     STATE_WON = 1
     STATE_LOST = 2
 
-    def __init__(self, board_size=BOARD_SIZE):
+    def __init__(self, move_penalty, enemy_penalty, food_reward, board_size=10):
         self.board_size = board_size
+
+
+        self.move_penalty = move_penalty
+        self.enemy_penalty = enemy_penalty
+        self.food_reward = food_reward
 
         # Create place holders
         self.player = None
@@ -99,9 +107,9 @@ class Game:
 
     def reset(self):
         # Create our players
-        self.player = Blob() #TODO: Link board_size to players
-        self.food = Blob()
-        self.enemy = Blob()
+        self.player = Blob(board_size=self.board_size) #TODO: Link board_size to players
+        self.food = Blob(board_size=self.board_size)
+        self.enemy = Blob(board_size=self.board_size)
 
         # Store if the game is over
         self._state = self.STATE_ACTIVE
@@ -115,17 +123,18 @@ class Game:
         self.player.action(action)
 
         # TODO: Maybe move food / enemy randomly (would probably need to add velocity to state )
+        self.enemy.move()
 
         # Calculate reward
         reward = None
         if self.player == self.enemy:
-            reward = -ENEMY_PENALTY
+            reward = -self.enemy_penalty
             self._state = self.STATE_LOST
         elif self.player == self.food:
-            reward = FOOD_REWARD
+            reward = self.food_reward
             self._state = self.STATE_WON
         else:
-            reward = -MOVE_PENALTY
+            reward = -self.move_penalty
 
         return self.state(), reward, self._state
 
@@ -140,132 +149,246 @@ class Game:
         env = np.zeros((self.board_size, self.board_size, 3), dtype=np.uint8)
         
         # NOTE: X and Y are goofy here... not 100% which lib needs it in this format
-        env[self.food.y][self.food.x] = d[FOOD_N] # Food color (dictonary kinda not needed)
-        env[self.player.y][self.player.x] = d[PLAYER_N]
-        env[self.enemy.y][self.enemy.x] = d[ENEMY_N]
+        env[self.food.y][self.food.x] = FOOD_COLOR # Food color (dictonary kinda not needed)
+        env[self.player.y][self.player.x] = PLAYER_COLOR
+        env[self.enemy.y][self.enemy.x] = ENEMY_COLOR
 
         # NOTE: RGB... might work it might also be BGR 
         img = Image.fromarray(env, "RGB")
-        img = img.resize((300,300), resample=Image.BOX) # Scale up image (previously was BOARD_SIZE x BOARD_SIZE)
+        img = img.resize((400,400), resample=Image.BOX) # Scale up image (previously was BOARD_SIZE x BOARD_SIZE)
         cv2.imshow("", np.array(img))
 
         if self.done(): # End game senarios
             # If at end of game flash frame for 500ms
             # waitKey is just used as a pause / sleep function
-            if cv2.waitKey(500) & 0xFF == ord('q'): # NOTE: Second clause is hacky (he said q breaks shit)
+            if cv2.waitKey(1000) & 0xFF == ord('q'): # NOTE: Second clause is hacky (he said q breaks shit)
                 return
         else:
             # If not at end of game flash frame for 1ms
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if cv2.waitKey(5) & 0xFF == ord('q'):
                 return
 
-q_table = {}
+class RenderThread:
+    '''
+    Race conditions? Never heard of them :)
+    '''
+    def __init__(self, q_table, game):
+        self.game = game
+        self.q_table = q_table
 
-if start_q_table is None:
+        self._run = False
+        self._process = None
 
-    # Observations state holds the following information
-    # relative_food_pos = (x1, y1) 
-    # relative enemy_pos = (x2, y2)
-    # Each x or y can be in the range from 0 to BOARD_SIZE - 1
-    #
-    # Finally,
-    # There are 3 actions per state/observation 
+    def start(self):
+        assert self._process is None
 
-    # TODO: Seems hacky but okay
-    for x1 in range(-BOARD_SIZE+1, BOARD_SIZE):
-        for y1 in range(-BOARD_SIZE+1, BOARD_SIZE):
-            for x2 in range(-BOARD_SIZE+1, BOARD_SIZE):
-                for y2 in range(-BOARD_SIZE+1, BOARD_SIZE):
-                    q_table[((x1, y1), (x2, y2))] = [np.random.uniform(-5, 0) for i in range(4)]
-else:
-    with open(start_q_table, "rb") as f:
-        q_table = pickle.load(f)
+        self._run = True
+        self._process = Process(target=self._render, args=(q_table, ))
+        self._process.daemon = True # Run without blocking
+        self._process.start()
 
-game = Game()
+    def stop(self):
+        self._run = False
+        print('Waiting for thread to rejoin...')
+        self._process.join()
+        self._process = None
 
-win_count = 0
-lose_count = 0
-episode_rewards = []
-for episode in tqdm(range(EPISODES_LEN)):
-    observation = game.reset()
+    def update_table(self, q_table):
+        self.q_table = q_table
 
-    if episode % SHOW_EVERY == 0:
-        print('\n\n=======================')
-        print(f'EPISODE #{episode}, epsilon: {EPSILON}')
-        print('=======================')
-        print(f'epsilon: {EPSILON}')
-        print(f'Mean (n={SHOW_EVERY}): {np.mean(episode_rewards[-SHOW_EVERY:])}')
-        print('=======================')
-        print(f'Wins:   {win_count}')
-        print(f'Losses: {lose_count}')
-        print(f'Draws:  {SHOW_EVERY-(win_count+lose_count)}')
-        print('=======================')
-        print(f'Win precentage: {round(win_count/SHOW_EVERY, 5)*100}')
-        print(f'Lose Precentage: {round(lose_count/SHOW_EVERY, 5)*100}')
+    def _render(self, q_table):
+        while self._run:
+            # Reset game and store inital state
+            observation = self.game.reset()
 
-        # Reset stats after reset
-        win_count = 0
-        lose_count = 0
+            for i in range(50):
+                # Generate action
+                action = np.argmax(self.q_table[observation])
 
-        show = True
+                new_observation, reward, game_state = self.game.step(action)
+
+                # Do the rendering
+                self.game.render()
+
+                # Break loop if end of episode
+                if self.game.done():
+                    break
+                
+                # Update observation for next time step
+                observation = new_observation
+
+
+def make_qtable(board_size=10):
+    table = {}
+    if start_q_table is None:
+
+        # Observations state holds the following information
+        # relative_food_pos = (x1, y1) 
+        # relative enemy_pos = (x2, y2)
+        # Each x or y can be in the range from 0 to BOARD_SIZE - 1
+        #
+        # Finally,
+        # There are 3 actions per state/observation 
+
+        # TODO: Seems hacky but okay
+        for x1 in range(-board_size+1, board_size):
+            for y1 in range(-board_size+1, board_size):
+                for x2 in range(-board_size+1, board_size):
+                    for y2 in range(-board_size+1, board_size):
+                        table[((x1, y1), (x2, y2))] = [np.random.uniform(-5, 0) for i in range(4)]
     else:
-        show = False
+        with open(start_q_table, "rb") as f:
+            raise 'Will not share state across processes'
+            table = pickle.load(f)
     
-    episode_reward = 0
-    for i in range(200):
-        if np.random.random() > EPSILON:
+    return table
+
+def sarsa_pipline(hyperparameters):
+    with wandb.init(project='Custom-SARSA', config=hyperparameters):
+        config = wandb.config
+
+        q_table, env = make(config)
+
+        train(config, q_table, env)
+
+        render_policy(q_table, env)
+
+
+def make(config):
+    q_table = make_qtable(board_size=config['BOARD_SIZE'])
+    game = Game( 
+        config['MOVE_PENALTY'],
+        config['ENEMY_PENALTY'],
+        config['FOOD_REWARD'],
+        board_size=config['BOARD_SIZE'],
+    )
+
+    return q_table, game
+
+def train(config, q_table, env):
+    # Create statistics
+    win_count = 0
+    lose_count = 0
+    episode_rewards = []
+
+    # Create epislon for e-greedy process
+    epsilon = config['EPSILON_START']
+    lr = config['LEARNING_RATE']
+    discount = config['DISCOUNT']
+    render = False
+
+    # Run specified number of episodes
+    for episode in tqdm(range(config['EPISODE_COUNT'])):
+        # Reset set up state for current episode
+        action = None
+        observation = env.reset()
+        episode_reward = 0
+        verbose_episode = (episode + 1) % config['SHOW_EVERY'] == 0
+
+        for i in range(config['EPISODE_LEN']):
+            # Select action via e-greedy method
+            if np.random.random() > epsilon:
+                action = np.argmax(q_table[observation])
+            else:
+                action = np.random.randint(0,4)
+            
+            # Preform action and get info back
+            new_observation, reward, game_state = env.step(action)
+
+            # Accumulate reward
+            episode_reward += reward
+
+            # Update Q-Table
+            new_q = None
+            if game_state == Game.STATE_ACTIVE:
+                max_future_q = np.max(q_table[new_observation])
+                current_q = q_table[observation][action]
+
+                new_q = (1 - lr) * current_q + lr * (reward + discount * max_future_q)
+            elif game_state == Game.STATE_LOST:
+                lose_count += 1
+                new_q = reward
+            elif game_state == Game.STATE_WON:
+                win_count += 1
+                new_q = reward 
+
+            assert new_q is not None, 'Error: Q Estimates should not be NoneType'
+            q_table[observation][action] = new_q
+
+            # Render frame if verbose
+            if verbose_episode:
+                env.render()
+            
+            if env.done():
+                break
+            
+            observation = new_observation
+
+        episode_rewards.append(episode_reward)
+
+        # Decay epsilon
+        epsilon *= config['EPS_DECAY']
+
+        if verbose_episode:
+            batch_mean = np.mean(episode_rewards[-config['SHOW_EVERY']:])
+            print('\n\n=======================')
+            print(f'EPISODE #{episode}')
+            print('=======================')
+            print(f'epsilon: {epsilon}')
+            print(f'Mean (n={config["SHOW_EVERY"]}): {batch_mean}')
+            print('=======================')
+            print(f'Wins:   {win_count}')
+            print(f'Losses: {lose_count}')
+            print(f'Draws:  {config["SHOW_EVERY"]-(win_count+lose_count)}')
+            print('=======================')
+            print(f'Win precentage: {round(win_count/config["SHOW_EVERY"], 5)*100}')
+            print(f'Lose Precentage: {round(lose_count/config["SHOW_EVERY"], 5)*100}')
+
+            wandb.log({
+                'episode': episode,
+                'epsilon': epsilon,
+                'batch_mean': batch_mean,
+                'win_precentage': round(win_count/config['SHOW_EVERY'], 5)*100,
+                'lose_precentage': round(lose_count/config['SHOW_EVERY'], 5)*100
+            })
+
+            # Reset stats after reset
+            win_count = 0
+            lose_count = 0
+
+def render_policy(q_table, env):
+    
+    while True:
+        action = None
+        observation = env.reset()
+        for i in range(200):
             action = np.argmax(q_table[observation])
-        else:
-            action = np.random.randint(0,4)
-        
-        new_observation, reward, game_state = game.step(action)
-    
+            new_observation, reward, game_state = env.step(action)
 
-        new_q = None
-        if game_state == Game.STATE_ACTIVE:
-            # Preform update to Q
-            max_future_q = np.max(q_table[new_observation])
-            #print(observation, action)
-            current_q = q_table[observation][action]
+            env.render()
 
-            # WARNING: Different than tutorial but 90% should work 
-            new_q = (1 - LEARNING_RATE) * current_q + LEARNING_RATE * (reward + DISCOUNT * max_future_q)
-        elif game_state == Game.STATE_LOST:
-            lose_count += 1
-            new_q = reward
-        elif game_state == Game.STATE_WON:
-            win_count += 1
-            new_q = reward 
+            if env.done():
+                break
 
-        assert new_q is not None, 'Error: Q Estimates should not be NoneType'
+            observation = new_observation
 
-        # Update the Q estimate
-        q_table[observation][action] = new_q
-        # Accumulate the total reward after each time step
-        episode_reward += reward
 
-        if show:
-            game.render()
 
-        # Break loop if end of episode
-        if game.done():
-            break
-        
-        # Update observation for next time step
-        observation = new_observation
+if __name__ == '__main__':
+        sarsa_pipline(hyperparameters)
 
-    episode_rewards.append(episode_reward)
+                
 
-    # Decay epsilon
-    EPSILON *= EPS_DECAY
+        '''
+        # TODO: Very unclear how this operation works
+        moving_average = np.convolve(episode_rewards, np.ones((config['SHOW_EVERY'],)) / config['SHOW_EVERY'], mode='valid')
+        plt.plot([i for i in range(len(moving_average))], moving_average)
+        plt.ylabel(f"Reward {config['SHOW_EVERY']}ma")
+        plt.xlabel("episode #")
+        plt.show()
 
-# TODO: Very unclear how this operation works
-moving_average = np.convolve(episode_rewards, np.ones((SHOW_EVERY,)) / SHOW_EVERY, mode='valid')
-plt.plot([i for i in range(len(moving_average))], moving_average)
-plt.ylabel(f"Reward {SHOW_EVERY}ma")
-plt.xlabel("episode #")
-plt.show()
+        if False:
+            with open(f"qtable-{int(time.time())}.pickle", "wb") as f:
+                pickle.dump(q_table, f)
 
-if False:
-    with open(f"qtable-{int(time.time())}.pickle", "wb") as f:
-        pickle.dump(q_table, f)
+        #render_process.stop()'''
