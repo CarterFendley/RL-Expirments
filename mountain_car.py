@@ -2,8 +2,11 @@ import os
 import gym
 import numpy as np
 from tqdm import tqdm
+from time import sleep
 from datetime import datetime
+from matplotlib import cm
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 env = gym.make("MountainCar-v0")
 
@@ -15,14 +18,15 @@ env = gym.make("MountainCar-v0")
 # [20, 20] for mountain car
 LEARNING_RATE = 0.1
 DISCOUNT = 0.95
-EPISODES = 10000
+EPISODES = 25000
 
 epsilon = 0.5
 START_EPSILON_DECAYING = 1
 END_EPSILON_DECAYING = EPISODES // 2 # in divsion
 epsilon_decay_value = epsilon / (END_EPSILON_DECAYING - START_EPSILON_DECAYING)
 
-SHOW_EVERY = 2000
+SHOW_EVERY = 100
+RENDER_EVERY = 10000
 
 log_qtables = True
 start_time = datetime.now()
@@ -54,13 +58,45 @@ def get_discrete_state(state):
     discrete_state = (state - env.observation_space.low) / descrete_o_space_win_size
     return tuple(discrete_state.astype(np.int))
 
+# Setup plotting
+print("Observation space: ", env.observation_space.high, env.observation_space.low)
+x = np.arange(-1.2, 0.6, 0.09)
+y = np.arange(-0.07, 0.07, 0.007)
+X, Y = np.meshgrid(x, y)
+
+def redraw_plt(plt, v_plt, q_table):
+    #NOTE: This is probably extremely inefficent
+    v_table = np.amax(q_table, axis=2)
+    v_plt.clear()
+    # Color maps visual aid: https://matplotlib.org/tutorials/colors/colormaps.html
+    plt_data = v_plt.plot_surface(X, Y, v_table, cmap=cm.RdYlGn)
+
+
+    v_plt.set_xlabel('position')
+    v_plt.set_ylabel('velocity')
+    v_plt.set_zlabel('value')
+
+    plt.draw()
+    plt.show(block=False)
+    plt.pause(0.05)
+
+
+
+v_plt = plt.figure(figsize=(12,10)).gca(projection='3d')
+redraw_plt(plt, v_plt, q_table)
+v_plt.set_xlabel('position')
+v_plt.set_ylabel('velocity')
+v_plt.set_zlabel('value')
+
+plt.ion()
+plt.show(block=False)
+
 
 for episode in tqdm(range(EPISODES)):
     # Keep track of reward per episode
     total_reward = 0
 
-    if episode % SHOW_EVERY == 0:
-        print(episode)
+    if episode % RENDER_EVERY == 0:
         render = True
     else:
         render = False
@@ -129,8 +165,12 @@ for episode in tqdm(range(EPISODES)):
 
         print(f'Episode: {episode} average: {average_reward} min: {min_reward} max: {max_reward}')
 
+        redraw_plt(plt, v_plt, q_table)
+
 
 env.close()
+
+input('Press enter to continue...')
 
 if False:
     plt.plot(rewards['episode'], rewards['average'], label='avg')
@@ -138,7 +178,7 @@ if False:
     plt.plot(rewards['episode'], rewards['max'], label='max')
     plt.legend(loc=4)
     plt.show()
-if True:
+if False:
     # Create v-table estimate
     x = np.arange(0, 20, 1)
     y = np.arange(0, 20, 1)
